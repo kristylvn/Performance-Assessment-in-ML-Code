@@ -20,9 +20,7 @@ gse_external <- readRDS("C:/Users/12250/Desktop/171225/MPhil/eplet/GSE129166.rds
 ```
 
 ```{r}
---------------------------------------------------------------------------------
 # Data preprocessing
---------------------------------------------------------------------------------
 
 # Extract expression and phenotype metadata
 exprset_internal <- gse_internal[[1]]
@@ -72,9 +70,7 @@ dim(x_ext)
 ```
 
 ```{r}
---------------------------------------------------------------------------------
 # Train/test split
---------------------------------------------------------------------------------
 
 # Partition data into folds with 70%/30% split
 set.seed(20)
@@ -111,9 +107,7 @@ y_train_num<-train_test$y
 ```
 
 ```{r}
---------------------------------------------------------------------------------
 # Repeated cross-validation (CV)
---------------------------------------------------------------------------------
 
 set.seed(13)   
 
@@ -182,9 +176,7 @@ cv_result1<-cv_func(x_train_mat,y_train_num)
 ```
 
 ```{r}
---------------------------------------------------------------------------------
 # Internal and external validation
---------------------------------------------------------------------------------
 
 internal_func<-function(x_train_mat,y_train_num,x_test_mat, y_test_num){
   y_train_num1 = as.factor(y_train_num)
@@ -224,9 +216,8 @@ internal_func<-function(x_train_mat,y_train_num,x_test_mat, y_test_num){
 ```
 
 ```{r}
---------------------------------------------------------------------------------
 # Plot results
---------------------------------------------------------------------------------
+
 # Internal and external datasets for plotting
 box_df_cv11 <- data.frame(
   category = c("Internal", "External"),
