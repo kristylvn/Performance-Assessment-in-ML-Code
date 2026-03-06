@@ -1,0 +1,257 @@
+---
+title: "Performance Assessment in Machine Learning - Code"
+author: "Kristy Nguyen & Chloe Yao"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# Load packages
+library(GEOquery)
+library(glmnet)
+library(pROC)
+library(caret)
+library(Biobase)
+library(ggplot2)
+library(limma)
+
+# Load datasets and update these file paths to match your local environment
+gse_internal <- readRDS("C:/Users/12250/Desktop/171225/MPhil/eplet/GSE147089.rds")
+gse_external <- readRDS("C:/Users/12250/Desktop/171225/MPhil/eplet/GSE129166.rds")
+```
+
+```{r}
+--------------------------------------------------------------------------------
+# Data preprocessing
+--------------------------------------------------------------------------------
+
+# Extract expression and phenotype metadata
+exprset_internal <- gse_internal[[1]]
+exprset_external <- gse_external[[1]]
+
+expr_internal <- exprs(exprset_internal)
+pheno_internal <- pData(exprset_internal)
+
+expr_external <- exprs(exprset_external)
+pheno_external <- pData(exprset_external)
+
+# Check expression matrix dimensions
+# The external dataset contains more probes than the internal dataset, so both datasets are restricted to the set of genes shared by both
+dim(expr_internal)
+dim(expr_external)
+
+# Inspect phenotype outcomes used to derive outcome labels 
+unique(pheno_internal$`phenotype:ch1`)
+unique(pheno_external$characteristics_ch1.2)
+
+# Keep only genes shared across both datasets
+common_genes <- intersect(rownames(expr_internal), rownames(expr_external))
+expr_internal <- expr_internal[common_genes, ]
+expr_external <- expr_external[common_genes, ]
+
+# Check relevant column in internal dataset and create binary outcome labels
+label_internal_raw <- pheno_internal$characteristics_ch1
+y_internal <- ifelse(grepl("No ABMRh", label_internal_raw), 0, 1)
+y_external <- as.numeric(gsub(".*: ", "", pheno_external$characteristics_ch1.2))
+
+# Check class counts and transpose so rows = samples, columns = genes
+table(y_internal)
+table(y_external)
+x_int1 <- t(as.matrix(expr_internal))
+x_ext1 <- t(as.matrix(expr_external))
+
+# Scale internal data, then apply same scaling to external data
+# Note: use the training mean and sd
+x_int <- scale(x_int1)  
+mean_train <- attr(x_int, "scaled:center")
+sd_train <- attr(x_int, "scaled:scale")
+x_ext <- scale(x_ext1, center = mean_train, scale = sd_train)
+
+cat("Internal and external expression dimension:\n")
+dim(x_int)
+dim(x_ext)
+```
+
+```{r}
+--------------------------------------------------------------------------------
+# Train/test split
+--------------------------------------------------------------------------------
+
+# Partition data into folds with 70%/30% split
+set.seed(20)
+
+split_func<-function(x_int, y_internal){
+  train_index <- createDataPartition(y_internal, p = 0.75, list = FALSE)
+
+  # Training data
+  x_train <- x_int[train_index, , drop = FALSE]
+  y_train <- y_internal[train_index]
+
+  # Testing data
+  x_test <- x_int[-train_index, , drop = FALSE]
+  y_test <- y_internal[-train_index]
+
+  # Formatting
+  y_train_num <- as.numeric(y_train)
+  x_train_mat <- as.matrix(x_train)
+  
+  y_test_num <- as.numeric(y_test)
+  x_test_mat <- as.matrix(x_test)
+
+  return(list(
+    x = x_train_mat, 
+    y = y_train_num,
+    a = x_test_mat,
+    b = y_test_num
+  ))
+  }
+
+train_test<-split_func(x_int, y_internal)
+x_train_mat<-train_test$x
+y_train_num<-train_test$y
+```
+
+```{r}
+--------------------------------------------------------------------------------
+# Repeated cross-validation (CV)
+--------------------------------------------------------------------------------
+
+set.seed(13)   
+
+cv_func <- function(x_train_mat, y_train_num) {
+  n_iter <- 20
+  auc_values2 <- vector("list", n_iter)   # store AUC vectors
+  
+  for (i in 1:n_iter) {
+    y_factor <- as.factor(y_train_num)
+    folds <- createFolds(y_factor, k = 3, list = TRUE, returnTrain = FALSE)
+    
+    auc_k <- numeric(3)   # AUC for each of the 3 folds
+    
+    for (k in 1:3) {
+      test_idx  <- folds[[k]]
+      train_idx <- setdiff(seq_along(y_train_num), test_idx)
+      
+      x_train <- x_train_mat[train_idx, ]
+      y_train <- y_train_num[train_idx]
+      
+      x_test  <- x_train_mat[test_idx, ]
+      y_test  <- y_train_num[test_idx]
+      
+      # Feature selection on training fold only using DE genes 
+      y_train_num1 = as.factor(y_train)
+      
+      design <- model.matrix(~ y_train_num1)
+      
+      fit <- lmFit(t(x_train), design)
+      
+      fit <- eBayes(fit)
+      
+      deg_500 <- topTable(fit, coef = 2, number = 500)
+      
+      genes_500 <- rownames(deg_500)
+      
+      x_train <- x_train[,genes_500]
+      x_test<- x_test[,genes_500]
+
+      # Train model
+      fit <- glmnet(
+        x_train, y_train,
+        family = "binomial",
+        alpha  = 1,
+        lambda = 0.1
+      )
+      
+      # Predict and calculate AUC
+      prob_k <- as.numeric(predict(fit, newx = x_test, type = "response"))
+      auc_k[k] <- suppressMessages(auc(y_test, prob_k))
+    }
+    
+    auc_values2[[i]] <- auc_k
+  }
+  
+  return(unlist(auc_values2))   # 20 × 3 = 60 AUC values
+}
+
+cv_result1<-cv_func(x_train_mat,y_train_num)
+
+      # CV dataset for plotting
+        box_df_cv1 <- data.frame(
+        category = "CV",
+        auc = cv_result1
+        )
+```
+
+```{r}
+--------------------------------------------------------------------------------
+# Internal and external validation
+--------------------------------------------------------------------------------
+
+internal_func<-function(x_train_mat,y_train_num,x_test_mat, y_test_num){
+  y_train_num1 = as.factor(y_train_num)
+  
+  design <- model.matrix(~ y_train_num1)
+  fit <- lmFit(t(x_train_mat), design)
+  fit <- eBayes(fit)
+  
+  deg_500 <- topTable(fit, coef = 2, number = 500)
+  genes_500 <- rownames(deg_500)
+  
+  x_train_mat <- x_train_mat[,genes_500]
+  x_test_mat <- x_test_mat[,genes_500]
+
+  fit1 <- glmnet(
+    x_train_mat,
+    y_train_num,
+    family = "binomial",
+    alpha  = 1,
+    lambda = 0.1
+  )
+  
+  # Predictions (probabilities)
+  pred_prob <- as.numeric(
+    predict(fit1, newx = x_test_mat, type = "response")
+  )
+  
+  # AUC
+  auc_value <- suppressMessages(auc(y_test_num, pred_prob))
+  return(auc_value)}
+
+  # Internal validation
+  int1 <- internal_func(train_test$x,train_test$y,train_test$a,train_test$b)
+  
+  # External validation
+  ext1 <- internal_func(x_int,y_internal,x_ext,y_external)
+```
+
+```{r}
+--------------------------------------------------------------------------------
+# Plot results
+--------------------------------------------------------------------------------
+# Internal and external datasets for plotting
+box_df_cv11 <- data.frame(
+  category = c("Internal", "External"),
+  auc = c(int1, ext1) 
+)
+
+# Combine datasets for plotting
+final_df<-rbind(box_df_cv1,box_df_cv11)
+
+# Boxplot
+ggplot(final_df, aes(x = category, y = auc)) +
+  geom_boxplot(data = box_df_cv1, aes(x = category, y = auc), fill = "lightblue") +
+  geom_point(data = box_df_cv11, aes(x = category, y = auc),
+             color = "pink", size = 3) +
+  scale_y_continuous(limits = c(0.5, 0.99)) +
+  scale_x_discrete(limits = c("CV", "Internal", "External")) +
+  theme_minimal() +
+    labs(
+    x = "Validation type",
+    y = "AUC",
+    title = "AUC Distribution: Cross-Validation vs Internal vs External"
+  )
+
+# Summary results
+mean(cv_result1)
+int1
+ext1
+```
